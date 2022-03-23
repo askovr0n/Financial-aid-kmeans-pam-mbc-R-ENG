@@ -1,0 +1,485 @@
+---
+title: "Financial AID - Clustering"
+author: "Artur Skowroński"
+date: "23 11 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE)
+Sys.setenv(LANG = "en")
+options(scipen = 999)
+```
+## Introduction 
+
+Unsupervised learning is a set of algorithms that, based on the data received, try to find certain characteristics, patterns and anomalies in the data, without being able to assist with hints or answers. These algorithms can be used e.g. for face recognition, image recognition and for purely business purposes e.g. shopping basket analysis.
+
+In the following work I will be dealing with the concept of clustering, which consists in dividing data into certain groups with similar characteristics. Using this method, I will try to find which countries charities should give financial aid to, based on quality of life and economic statistics.
+
+#### Importing essential libraries
+```{r libraries, message=FALSE}
+
+# Libraries for data analysis
+library("tidyverse")
+library("psych")
+library("data.table")
+library("tidytext")
+
+# Libraries for visualisation
+library("corrplot")
+library("ggplot2")
+library("DataExplorer")
+library("RColorBrewer")
+library("kableExtra")
+library("tidytext")
+
+#libraries for clustering
+library("clustertend")
+library("factoextra") # drawing charts for clustering
+library("gridExtra")
+library("mclust") # Model Based Algorithm
+
+```
+## Dataset
+
+The dataset was downloaded from this link: https://www.kaggle.com/rohan0301/unsupervised-learning-on-country-data and it contains information about socio-economic and health factors for 167 countries.
+
+```{r dataset}
+
+unchanged_countries<- read.csv('country-data.csv')
+countries <- read.csv('country-data.csv')
+countries_description <- read.csv('data-dictionary.csv', sep = ",", header = FALSE)
+kable(head(countries)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+kable(countries_description[-1, ])
+```
+## Exploratory Data Analysis
+
+At the beginning of my analysis, I decided to check basic descriptive statistics and find rows with missing data.
+
+```{r values}
+
+cat("Dimension of the dataset: ","(",dim(countries),")")
+kable(psych::describe(countries)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r plot_missing, message = FALSE, warning = FALSE}
+
+check_missing <- plot_missing(
+  countries, 
+  ggtheme = theme_bw(),
+  title = "Missing Values") +
+  theme_update(plot.title = element_text(hjust = 0.5))
+
+```
+#### Visualisations
+
+Now, let's "penetrate" the data and look for some interesting relationships and additional information. 
+
+```{r boxplot, out.width = "150%", out.height = "150%"}
+
+countries %>%
+  gather(Info, value, 2:10) %>%
+  ggplot(aes(x=value, fill=Info)) +
+  geom_boxplot(color = "black", show.legend=FALSE) +
+  facet_wrap(~Info, scales="free") +
+  labs(x="Values", y="",
+       title="countries Data - Boxplots") +
+  theme_update(plot.title = element_text(hjust = 0.5),
+               axis.ticks.y=element_blank(),
+               axis.text.y=element_blank())
+
+```
+
+Basing on the above analysis, we see that there might be potential outliers, which may significantly affect subsequent results. I will bear this in mind and try to do something about it later in the project.
+
+```{r histograms, out.width = "150%", out.height = "150%"}
+
+countries %>%
+  gather(Info, value, 2:10) %>%
+  ggplot(aes(x=value, fill=Info)) +
+  geom_histogram(colour="white", show.legend=FALSE) +
+  facet_wrap(~Info, scales="free_x") +
+  labs(x="Values", y="Frequency",
+       title="countries Data - Histograms") +
+  theme_update(plot.title = element_text(hjust = 0.5))
+
+```
+
+As wee see, our data is mostly right skewed - in this case for the right skewed variables I will focus only on their maximal values, while for the left skewed for minimal values.
+This trick will help me understand the data better and get more knowledge about the countries which are taken into analysis.
+
+```{r top_5, out.width = "150%", out.height = "150%"}
+dataframes_sorted <- lapply(countries[, -1], function(x) countries %>% 
+                              arrange(desc(x)))
+
+reorder_columns_dfs <- lapply(dataframes_sorted, function (x){x[1:5,c(2,3,4,5,6,7,8,9,10,1)]})
+
+# In below dataset I will save top 5 countries for each variable
+top_features <- data.frame(variable = "x", country = "y", values = 1)
+
+for (i in 1:length(reorder_columns_dfs)) {
+  temp <- reorder_columns_dfs[[i]] %>% 
+    select(country) %>% 
+    mutate("variable" = colnames(reorder_columns_dfs[[i]])[i], .before = country) %>% 
+    mutate("values" = reorder_columns_dfs[[i]][, i])
+  
+  top_features <- rbind(top_features, temp)
+}
+
+# Delete temporary row
+top_features <- top_features[-1, ]
+
+# Order the countries and plot the variables
+indexes_top_5_countries <- top_features %>% 
+                            group_by(variable) %>%
+                            ungroup() %>%
+                            mutate(variable = as.factor(variable),
+                                   country = reorder_within(country, values, variable)) %>%
+                            ggplot(aes(x = country, y = values, fill = variable)) +
+                              geom_col(show.legend=FALSE) +
+                              facet_wrap(~variable, scales="free") +
+                                scale_x_reordered() +
+                                labs(title = "Top 5 countries per each variable", y = "", x = "Countries"
+                                  )
+
+indexes_top_5_countries + theme(axis.text.x = element_text(color = "000033", 
+                           size = 7, angle = 20))
+
+```
+Based on the barplots above, I can say that my data set seems to reflect reality. Therefore, I already have the first indication that my outliers are not spurious values. In addition, I can conclude that the countries that will need financial assistance first will predominantly be from Africa. In later parts of the paper, I will try to specify more precisely which countries these will be. 
+
+Let's examine correlation, using spearman method, because the variables do not follow a normal distribution 
+
+```{r correlation}
+
+par(mfrow=c(1,1))
+
+countries_matrix <- data.matrix(countries, rownames.force = NA)
+corr.data <- cor(countries_matrix, method = "spearman")
+corrplot(corr.data, type = 'lower', order = 'hclust', tl.col = 'black',
+    cl.ratio = 0.2, tl.srt = 45, col = COL2('PuOr', 10))
+
+```
+
+There is some correlation between variables, however, this should not have a major impact on my analysis.
+
+Now, let's try to clean the data by removing outliers with IQR method.
+
+```{r IQR}
+
+temp_country <- countries[, -1]
+
+out <- boxplot.stats(countries$child_mort)$out
+out_ind <- which(countries$child_mort %in% c(out))
+
+result <- do.call("cbind",lapply(temp_country, function(x) length(boxplot.stats(x)$out)))
+result
+
+```
+
+Especially interesting seems to be variables income and gdpp, where a lot of outliers have been recognized. Let's assess whether it would be worthwhile to remove these records.
+
+```{r check_income}
+
+out <- boxplot.stats(countries$income)$out
+out_ind <- which(countries$income %in% c(out))
+countries[out_ind, ]$country
+
+out <- boxplot.stats(countries$gdpp)$out
+out_ind <- which(countries$gdpp %in% c(out))
+countries[out_ind, ]$country
+
+```
+As regards the income variable, let us recall that it is calculated per capita. We can see that this group includes countries that we can definitely consider rich. In this case there is no point in removing them.
+
+For the variable gdpp the situation is very similar, which coincides with the logic. Therefore, it was again decided to not remove any country from the analysis.
+
+##### Standarisation of the data
+
+```{r scale, message = FALSE, warning = FALSE}
+
+countries_unscaled <- data.frame(countries) # making copy, because it will be helpful in comparison of the clusters
+
+# Now scale
+countries <- countries %>% 
+              mutate_if(is.numeric, scale)
+
+```
+
+## Prediagnostics
+
+In order to implement the kmeans and pams algorithm, it is useful to first check that our dataset properly has "clustering" characteristics. To do this, we use the Hopkins metric. The closer the value for this statistic is to 1, the more "clusterable" our data is. We can also illustrate this graphically (dissimilarity plot), where getting clear rectangles confirms possibility of finding clusters. In my case, hopkins statistic is equal to 0.9287641, so I can confidently use clustering methods
+
+```{r hopking}
+
+get_clust_tendency(countries[,-1], 2, graph=TRUE, gradient=list(low="red", mid="white", high="blue"), seed = 123)
+
+```
+
+## Comparison of optimal number of clusters
+
+In this step, we are going to find the optimal number of clusters for each method. My dataset is rather small, so I wouldn't use CLARA method, which is mainly helpful in the big data structures.
+
+**Sillhoutte**
+
+```{r sillhoutte}
+
+opt_kmeans_sill <- fviz_nbclust(countries[,-1], FUNcluster = kmeans, method = "silhouette") + 
+  theme_classic() +
+  labs(subtitle = "Silhouette method with K-means")
+
+opt_pam_sill <- fviz_nbclust(countries[,-1], FUNcluster = cluster::pam, method = "silhouette") + 
+  theme_classic() +
+  labs(subtitle = "Silhouette method with PAM")
+
+opt_hct_sill <- fviz_nbclust(countries[,-1], FUNcluster = hcut, method = "silhouette") +
+  theme_classic() +
+  labs(subtitle = "Silhouette method with Hierarchical Clustering")
+
+grid.arrange(opt_kmeans_sill, opt_pam_sill, opt_hct_sill, ncol=2)
+
+```
+
+After taking into account the sillhoutte method for the different algorithms, varied results were obtained, but for the PAM and Hierarchical Clustering method the optimal number of clusters is 2, which is not a very satisfactory result. It was decided to perform a similar analysis, using the GAP metric in order to find a better results.
+
+**GAP method**
+
+```{r gap}
+
+opt_kmeans_gap <- fviz_nbclust(countries[,-1], FUNcluster = kmeans, method = "gap") + theme_classic() +
+  labs(subtitle = "GAP method with K-means")
+opt_pam_gap <- fviz_nbclust(countries[,-1], FUNcluster = cluster::pam, method = "gap") + theme_classic() +
+  labs(subtitle = "GAP method with PAM")
+opt_hct_gap <- fviz_nbclust(countries[,-1], FUNcluster = hcut, method = "gap") + theme_classic() +
+  labs(subtitle = "GAP method with Hierarchical Clustering")
+grid.arrange(opt_kmeans_gap, opt_pam_gap, opt_hct_gap, ncol=2)
+
+```
+
+In the case of GAP method, we see that results are similar to each other.
+
+Based on the above fact, It seems to me that the division into 3 clusters from a business point of view might be the best. In a way, this division can be a reflection of rich, middle-income and poor countries. Nevertheless, in further analysis we will also examine how the algorithms behave when considering only 2 clusters. 
+
+
+## Kmeans & PAM
+
+The best known/easiest algorithms for clustering variables are Kmeans and PAM. Although they are very similar, two important differences between them should be mentioned. In kmeans, our task is to find centroids, i.e., group centers, for which the sum of distances for all points between a given cluster point will be as small as possible. In the PAM algorithm, the idea is similar; however, we replace centroids with medoids, i.e., points that are derived from our passed dataset. Therefore, in the PAM method, the set of possible clusters is smaller but more stable. There are many ways to count these distances such as manhattan or canberra. Nevertheless, in my work I will use a basic distance called sillhoutte.
+
+```{r kmeans_pam}
+
+# In the below dataframe I will save the results of each algorithm
+countries_division <- data.frame(countries$country)
+
+temp_chart_clust_plot <- list()
+temp_chart_clust_sill <- list()
+temp <- 1
+  
+cluster_types <- c("kmeans", "pam") # change your values here
+cluster_numbers <- c(2,3)
+
+for(number in cluster_numbers) {
+  for (type in cluster_types) {
+
+    # Plot clusters
+    clustering_info<- eclust(countries[,-1], FUNcluster = type, k=number, hc_metric = 'euclidean', graph = FALSE)
+    clustering_kmeans_chart_plot <- fviz_cluster(clustering_info, geom = c("point")) + 
+      ggtitle(paste(paste(toupper(substr(type, 1, 1)), 
+                          substr(type, 2, nchar(type)), sep = ""),"with", number, "clusters", collapse = ""))
+      
+    # Plot silhouette
+    clustering_kmeans_chart_sill <- fviz_silhouette(clustering_info) + 
+      ggtitle(paste(paste(toupper(substr(type, 1, 1)), 
+                          substr(type, 2, nchar(type)), sep = ""),"with", number, "clusters", 
+                          "\n and width equal: ",  round(mean(clustering_info$silinfo$avg.width), 2), collapse = ""))
+      
+    # Save plots into list
+    temp_chart_clust_plot[[temp]] <- clustering_kmeans_chart_plot
+    temp_chart_clust_sill[[temp]] <- clustering_kmeans_chart_sill
+      
+    # Save number of cluster for each country based on each type of algorithm and number of clusters
+    countries_division$new <- clustering_info$cluster
+    colnames(countries_division)[temp+1] <- paste(type, number, sep = "_")
+    temp <-  temp + 1
+      
+  }
+}
+
+grid.arrange(grobs = temp_chart_clust_plot, ncol=2 , top = "Clustering plots")
+grid.arrange(grobs = temp_chart_clust_sill, ncol=2 , top = "Silhoutte plots")
+
+```
+
+As you can see from the graphs above, I was able to efficiently split my variables in such a way that I got well separated clusters. Let's see what conclusions we can come to after considering other ways.
+
+## Hierarchical Clustering
+
+In hierarchical clustering, our goal is to determine the similarities between individual data, which contributes to obtaining graphs in the form of trees. At first, we treat each observation as a separate cluster, and then we start to combine similar observations into larger sets. Of course, also in this case there are many methods of calculating distances between data. For the following 4 metrics I decided to present their results graphically, in order to illustrate how significantly they can influence the final results. The best of them (and also the most time-consuming) is undoubtedly Ward's method, which determines clusters with the minimum variance. The results obtained from this method, I decided to save to the final set, so that I can get a comparison between other algorithms.
+
+**Single method**
+
+```{r hierarchical_clustering_single}
+hc_single <- eclust(countries[,-1], k=3, FUNcluster="hclust", hc_metric="euclidean", hc_method = "single")
+hc_single$labels<-countries$country
+plot(hc_single, cex=0.6, hang=-1, main = "Dendrogram of HAC")
+rect.hclust(hc_single, k=3, border='red')
+```
+
+**Complete method**
+
+```{r hierarchical_clustering_complete}
+hc_complete <- eclust(countries[,-1], k=3, FUNcluster="hclust", hc_metric="euclidean", hc_method = "complete")
+hc_complete$labels<-countries$country
+plot(hc_complete, cex=0.6, hang=-1, main = "Dendrogram of HAC")
+rect.hclust(hc_complete, k=3, border='red')
+```
+**Average method**
+
+```{r hierarchical_clustering_average}
+hc_average <- eclust(countries[,-1], k=3, FUNcluster="hclust", hc_metric="euclidean", hc_method = "average")
+hc_average$labels<-countries$country
+plot(hc_average, cex=0.6, hang=-1, main = "Dendrogram of HAC")
+rect.hclust(hc_average, k=3, border='red')
+```
+
+**Ward.D2 method <- the best method**
+
+```{r hierarchical_clustering_hcward}
+hc_ward <- eclust(countries[,-1], k=3, FUNcluster="hclust", hc_metric="euclidean", hc_method = "ward.D2")
+hc_ward$labels<-countries$country
+plot(hc_ward, cex=0.6, hang=-1, main = "Dendrogram of HAC")
+rect.hclust(hc_ward, k=3, border='red')
+```
+
+```{r saving_hierarchical}
+
+ward_hclust<-cutree(hc_ward, k=3)
+table(ward_hclust)
+
+countries_division$ward_hclust <- ward_hclust
+
+```
+## Model Based Clustering
+
+Model-based clustering assumes that the data is generated by an underlying probability distribution and tries to recover the distribution from the dat. The most popular approach is the Gaussian Mixture Model, which uses the mean vector, covariance matrix and the probability of each variable belonging to each cluster in its calculations. Our main task is to maximize the BIC statistic, which in its notation somehow penalizes models that have too many clusters.
+
+```{r model_based_clustering}
+
+mc_countries <- Mclust(countries)
+
+summary(mc_countries)
+
+# BIC values used for choosing the number of clusters #THE HIGHEST BIC the better
+(BIC_mc_countries <- fviz_mclust(mc_countries, "BIC", palette = "jco"))
+# Classification: plot showing the clustering
+fviz_mclust(mc_countries, "classification", geom = "point", 
+            pointsize = 1.5, palette = "jco")
+
+```
+At first we see that the optimal number of clusters is 5, while the clustering graph itself does not look very nice. Let's see what happens if we artificially influence the algorithm by imposing a number of clusters equal to 2 and 3
+
+```{r mbc_continue}
+mc_countries_2 <- Mclust(countries, G = 2)
+mc_countries_3 <- Mclust(countries, G = 3)
+
+summary(mc_countries_3)
+
+# Save the results into my final dataframe
+countries_division$mbc_2 <- mc_countries_2$classification 
+countries_division$mbc_3 <- mc_countries_3$classification 
+
+fviz_cluster(mc_countries_2)
+fviz_cluster(mc_countries_3)
+
+```
+
+As we can see, the situation has not improved much, nevertheless, for the sake of comparison and exercise, I decided to include the results in the final analysis.
+
+### Selecting optimal solution
+
+Because we are concentrating on financial aid, let's focus only on some variables which might be the most important for us:
+
+* exports
+* imports
+* income 
+* inflation
+
+```{r add_values}
+
+countries_division$exports <- unchanged_countries$exports
+countries_division$imports <- unchanged_countries$imports
+countries_division$income <- unchanged_countries$income
+countries_division$inflation <- unchanged_countries$inflation
+
+# Creating empty dataframe where I will store calculated results
+clusters_summarised <- data.frame(Algorithm = character(),
+                                  Clusters = integer(),
+                                  exports = double(),
+                                  imports = double(),
+                                  income = double(),
+                                  inflation = double())
+
+# Add results into dataframe
+groups <- c(quo(kmeans_2), quo(pam_2), quo(kmeans_3), quo(pam_3), quo(ward_hclust), quo(mbc_2), quo(mbc_3))
+
+for (i in seq_along(groups)) {
+  temp <- countries_division %>% 
+            group_by(!!groups[[i]]) %>% # Unquote with !!
+            summarise_each(funs(median), c(exports, imports, income, inflation)) %>% 
+            mutate("Algorithm" = colnames(countries_division[i+1])) %>% 
+            rename(Clusters = !!groups[[i]]) %>% 
+            relocate(Algorithm, .before = Clusters) %>%
+    print()
+    
+  clusters_summarised <- rbind(clusters_summarised, temp)
+}
+
+head(clusters_summarised)
+
+
+```
+
+So we see, that for each algorithm we have calculated median for 4 variables.
+Now let's check, which algorithms have allowed us to obtain the lowest import, export, income values and the highest inflation rate.
+
+```{r min_values}
+# Positions of our desired values
+as.matrix(apply(clusters_summarised[, 3:5],2,which.min))
+as.matrix(apply(clusters_summarised[, 6],2,which.max))
+
+```
+
+```{r min_max_values}
+clusters_summarised[c(8, 10, 11), ]
+```
+Ward_hclust (1st cluster group) has the lowest exports and income, while pam_3 (3rd cluster group) has the lowest imports and the highest inflation (1st cluster).
+
+Let's see which countries belongs to these algorithms.
+
+```{r check countries}
+
+countries_division %>% 
+  filter((pam_3 == 1 & ward_hclust == 1) | (pam_3 == 3 & ward_hclust == 1)) %>% 
+  select(countries.country)
+
+```
+So we have 27 countries out of 167 for which we may think to target them first in order to financial aid. Most of them, obviously, come from Africa, which seems to be logical.
+
+## Summary
+
+The main aim of the study was to answer the question of which countries charities should help financially in the first place. From an initial analysis of the data, I checked whether the values of the indices corresponded to reality. Through helpful visualisations I came to the conclusion that the countries in need would mostly come from Africa. In order to identify which countries these might be, I used the algorithms: kmeans, pam, hierarchical clustering and model based clustering method. For the first 3 models I obtained satisfactory result and well distinguished clusters, however its cannot be said the same for the last method. Nevertheless, this did not affect the final results and in the end, 2 types of models (pam with 1st and 3rd cluster group and hierachical clustering with 1st cluster group) were taken into account. Of the 27 potentially needy countries identified, most of them are from Africa, which is in line with my initial assumptions. Therefore, I believe that I have succeeded in fulfilling the purpose of the paper and it has a meaningful translation to the global reality.
+
+## References
+
+https://pbiecek.github.io/NaPrzelajDataMiningR/part-3.html
+
+https://bradleyboehmke.github.io/HOML/model-clustering.html
+
+https://en.proft.me/2017/02/1/model-based-clustering-r/
+
+https://cran.r-project.org/web/packages/mclust/vignettes/mclust.html
+
+https://en.wikipedia.org/wiki/Hopkins_statistic
+
