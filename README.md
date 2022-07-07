@@ -9,4 +9,4 @@
 
 Snapshot of EDA          |  Clustering - KMeans/PAM
 :-------------------------:|:-------------------------:
-![](images/Project_3/EDA.png](https://github.com/askovr0n/Portfolio/blob/main/images/Project_3/EDA.png)  |  ![](https://github.com/askovr0n/Portfolio/blob/main/images/Project_3/clusters.png)
+![](https://github.com/askovr0n/Portfolio/blob/main/images/Project_3/EDA.png)  |  ![](https://github.com/askovr0n/Portfolio/blob/main/images/Project_3/clusters.png)
